@@ -1,12 +1,13 @@
-import { useMemo, useRef, useState } from 'react'
-import type { ChangeEvent, DragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ChangeEvent, DragEvent, ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ArrowDown, ArrowUp, Download, FileOutput, FilePlus2, GripVertical, Printer, Settings2, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, BookOpen, Download, FileOutput, FilePlus2, GripVertical, ListTree, Minus, PanelLeftClose, PanelLeftOpen, Plus, Printer, Settings2, SunMedium, Trash2, X } from 'lucide-react'
 import './App.css'
 
 type SourceFile = { id: string; name: string; content: string }
 type JoinMode = 'plain' | 'line' | 'heading'
+type TableOfContentsItem = { id: string; level: number; title: string }
 
 const makeDocument = (files: SourceFile[], mode: JoinMode) => files.map((file) => {
   const content = file.content.trim()
@@ -19,6 +20,10 @@ const downloadFile = (content: BlobPart, name: string, type: string) => {
   link.href = url; link.download = name; link.click(); URL.revokeObjectURL(url)
 }
 
+const textFromChildren = (children: ReactNode): string => Array.isArray(children) ? children.map(textFromChildren).join('') : typeof children === 'string' || typeof children === 'number' ? String(children) : ''
+const safeTitle = (value: string) => value.replace(/[`*_~[\]]/g, '').trim()
+const documentHash = (value: string) => { let hash = 0; for (let index = 0; index < value.length; index += 1) hash = (hash * 31 + value.charCodeAt(index)) | 0; return `joint-md-progress-${hash}` }
+
 export default function App() {
   const [files, setFiles] = useState<SourceFile[]>([])
   const [joinMode, setJoinMode] = useState<JoinMode>('line')
@@ -26,9 +31,22 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false)
   const [draggedId, setDraggedId] = useState<string | null>(null)
   const [notice, setNotice] = useState('')
+  const [readerMode, setReaderMode] = useState(false)
+  const [tocOpen, setTocOpen] = useState(false)
+  const [fontSize, setFontSize] = useState(() => Number(localStorage.getItem('joint-md-font-size')) || 16)
+  const [softPaper, setSoftPaper] = useState(() => localStorage.getItem('joint-md-soft-paper') === 'true')
   const inputRef = useRef<HTMLInputElement>(null)
   const previewRef = useRef<HTMLDivElement>(null)
   const markdown = useMemo(() => makeDocument(files, joinMode), [files, joinMode])
+  const progressKey = useMemo(() => documentHash(markdown), [markdown])
+  const toc = useMemo<TableOfContentsItem[]>(() => Array.from(markdown.matchAll(/^(#{1,3})\s+(.+)$/gm)).map((match, index) => ({ id: `section-${index}`, level: match[1].length, title: safeTitle(match[2]) })), [markdown])
+
+  useEffect(() => { localStorage.setItem('joint-md-font-size', String(fontSize)) }, [fontSize])
+  useEffect(() => { localStorage.setItem('joint-md-soft-paper', String(softPaper)) }, [softPaper])
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => { const savedPosition = Number(localStorage.getItem(progressKey)); if (savedPosition && previewRef.current) previewRef.current.scrollTop = savedPosition })
+    return () => cancelAnimationFrame(frame)
+  }, [progressKey])
 
   const addFiles = async (incoming: FileList | File[]) => {
     const accepted = Array.from(incoming).filter((file) => /\.(md|markdown)$/i.test(file.name))
@@ -55,9 +73,16 @@ export default function App() {
     printWindow.addEventListener('load', () => printWindow.print(), { once: true })
     setNotice('已打开打印窗口，请在目标中选择“另存为 PDF”。')
   }
+  const scrollToSection = (id: string) => { document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); setTocOpen(false) }
+  const headingId = (children: ReactNode) => toc.find((item) => item.title === textFromChildren(children).trim())?.id
+  const headingComponents = {
+    h1: ({ children }: { children?: ReactNode }) => <h1 id={headingId(children)}>{children}</h1>,
+    h2: ({ children }: { children?: ReactNode }) => <h2 id={headingId(children)}>{children}</h2>,
+    h3: ({ children }: { children?: ReactNode }) => <h3 id={headingId(children)}>{children}</h3>,
+  }
 
-  return <main className="app-shell">
-    <header className="topbar"><div className="brand"><span className="brand-mark">J</span><span>Joint MD</span></div><div className="local-state"><i />本地处理</div></header>
+  return <main className={`app-shell ${readerMode ? 'reader-mode' : ''} ${softPaper ? 'soft-paper' : ''}`}>
+    <header className="topbar"><div className="brand"><span className="brand-mark">J</span><span>Joint MD</span></div><div className="top-actions"><span className="local-state"><i />本地处理</span><button className="reader-toggle" type="button" onClick={() => setReaderMode((enabled) => !enabled)}>{readerMode ? <PanelLeftOpen size={17} /> : <BookOpen size={17} />}{readerMode ? '返回合并' : '阅读模式'}</button></div></header>
     <section className="workspace">
       <aside className="control-panel">
         <div className="panel-heading"><div><p>文件队列</p><h1>合并 Markdown</h1></div>{files.length > 0 && <span className="count">{files.length}</span>}</div>
@@ -67,7 +92,10 @@ export default function App() {
         <div className="file-list">{files.length === 0 ? <div className="empty-list">添加文件后，可通过拖动或箭头调整合并顺序。</div> : files.map((file, index) => <article className="file-row" key={file.id} draggable onDragStart={() => setDraggedId(file.id)} onDragEnd={() => setDraggedId(null)} onDragOver={(event) => event.preventDefault()} onDrop={() => dropAt(file.id)}><GripVertical className="drag-handle" size={17} /><span className="file-index">{String(index + 1).padStart(2, '0')}</span><span className="file-name" title={file.name}>{file.name}</span><div className="row-actions"><button className="icon-button" type="button" title="上移" aria-label={`上移 ${file.name}`} disabled={index === 0} onClick={() => moveFile(index, index - 1)}><ArrowUp size={15} /></button><button className="icon-button" type="button" title="下移" aria-label={`下移 ${file.name}`} disabled={index === files.length - 1} onClick={() => moveFile(index, index + 1)}><ArrowDown size={15} /></button><button className="icon-button danger" type="button" title="移除" aria-label={`移除 ${file.name}`} onClick={() => setFiles((current) => current.filter((item) => item.id !== file.id))}><Trash2 size={15} /></button></div></article>)}</div>
         <div className="settings"><div className="settings-title"><Settings2 size={17} />合并设置</div><label htmlFor="name">导出文件名</label><input id="name" value={outputName} onChange={(event) => setOutputName(event.target.value)} /><fieldset><legend>文件之间</legend><label><input type="radio" name="join" checked={joinMode === 'plain'} onChange={() => setJoinMode('plain')} />留出空行</label><label><input type="radio" name="join" checked={joinMode === 'line'} onChange={() => setJoinMode('line')} />插入分隔线</label><label><input type="radio" name="join" checked={joinMode === 'heading'} onChange={() => setJoinMode('heading')} />加上文件标题</label></fieldset></div>
       </aside>
-      <section className="preview-panel"><div className="preview-header"><div><p>实时预览</p><h2>{outputName || 'merged-document'}.md</h2></div><span>{files.length ? `${files.length} 个文件 · ${markdown.length.toLocaleString()} 个字符` : '等待文件'}</span></div><div ref={previewRef} className={`preview-content ${markdown ? '' : 'is-empty'}`}>{markdown ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown> : <div><FileOutput size={34} /><p>合并后的文档会显示在这里</p></div>}</div><footer className="export-bar"><span role="status">{notice}</span><div><button className="secondary-button" type="button" disabled={!markdown} onClick={() => downloadFile(markdown, `${outputName || 'merged-document'}.md`, 'text/markdown;charset=utf-8')}><Download size={17} />导出 Markdown</button><button className="primary-button" type="button" disabled={!markdown} onClick={printPdf}><Printer size={17} />打印为 PDF</button></div></footer></section>
+      <section className="preview-panel"><div className="preview-header"><div><p>{readerMode ? '专注阅读' : '实时预览'}</p><h2>{outputName || 'merged-document'}.md</h2></div><div className="preview-tools"><span>{files.length ? `${files.length} 个文件 · ${markdown.length.toLocaleString()} 个字符` : '等待文件'}</span><button className="tool-button" type="button" title="目录" aria-label="目录" disabled={!toc.length} onClick={() => setTocOpen((open) => !open)}><ListTree size={17} /></button><button className="tool-button" type="button" title="减小字号" aria-label="减小字号" disabled={fontSize <= 14} onClick={() => setFontSize((size) => size - 1)}><Minus size={17} /></button><span className="font-size">A</span><button className="tool-button" type="button" title="增大字号" aria-label="增大字号" disabled={fontSize >= 20} onClick={() => setFontSize((size) => size + 1)}><Plus size={17} /></button><button className={`tool-button ${softPaper ? 'selected' : ''}`} type="button" title="护眼纸张色" aria-label="护眼纸张色" onClick={() => setSoftPaper((enabled) => !enabled)}><SunMedium size={17} /></button>{!readerMode && <button className="tool-button reader-icon" type="button" title="进入阅读模式" aria-label="进入阅读模式" onClick={() => setReaderMode(true)}><PanelLeftClose size={17} /></button>}</div></div>
+        {tocOpen && <nav className="toc-panel" aria-label="文章目录"><div><strong>目录</strong><button className="tool-button" type="button" title="关闭目录" aria-label="关闭目录" onClick={() => setTocOpen(false)}><X size={16} /></button></div>{toc.map((item) => <button type="button" key={item.id} className={`toc-item level-${item.level}`} onClick={() => scrollToSection(item.id)}>{item.title}</button>)}</nav>}
+        <div ref={previewRef} className={`preview-content ${markdown ? '' : 'is-empty'}`} style={{ fontSize: `${fontSize}px` }} onScroll={(event) => localStorage.setItem(progressKey, String(event.currentTarget.scrollTop))}>{markdown ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={headingComponents}>{markdown}</ReactMarkdown> : <div><FileOutput size={34} /><p>合并后的文档会显示在这里</p></div>}</div><footer className="export-bar"><span role="status">{notice}</span><div><button className="secondary-button" type="button" disabled={!markdown} onClick={() => downloadFile(markdown, `${outputName || 'merged-document'}.md`, 'text/markdown;charset=utf-8')}><Download size={17} />导出 Markdown</button><button className="primary-button" type="button" disabled={!markdown} onClick={printPdf}><Printer size={17} />打印为 PDF</button></div></footer>
+      </section>
     </section>
   </main>
 }
